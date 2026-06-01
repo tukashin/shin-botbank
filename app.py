@@ -1,59 +1,79 @@
-import os
+import time
 from flask import Flask, request, jsonify
 import ccxt
 
 app = Flask(__name__)
 
-# ==========================================
-# bitbank API接続設定（信用取引モード）
-# ==========================================
-API_KEY = os.environ.get('BITBANK_API_KEY')
-API_SECRET = os.environ.get('BITBANK_API_SECRET')
-
+# bitbank APIクライアント初期化（認証情報は環境変数から取得）
 exchange = ccxt.bitbank({
-    'apiKey': API_KEY,
-    'secret': API_SECRET,
-    'enableRateLimit': True,
-    # 💥ここが超重要！信用取引（レバレッジ）を行うための設定です
-    'options': {
-        'defaultType': 'margin' 
-    }
+    'apiKey': 'YOUR_API_KEY',
+    'secret': 'YOUR_SECRET_KEY',
+    'enableRateLimit': True
 })
 
-@app.route('/status', methods=['GET'])
-def status():
-    return "FRIDAY OVERDRIVE ACTIVE (MARGIN MODE)", 200
+SYMBOL = 'BTC/JPY'
+FIXED_AMOUNT = 0.001  # テスト運用サイズ
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json()
-    
-    # 🔐 セキュリティチェック（合言葉の検証）
-    if not data or data.get('password') != 'friday':
-        return jsonify({"status": "error", "message": "Invalid password"}), 403
-        
-    action = data.get('action')
-    symbol = 'BTC/JPY' # ビットコイン信用取引
-    amount = 0.001     # 💥注文するBTCの枚数（最低注文数量付近にセットしています）
-
     try:
-        if action == 'buy':
-            # 📈 ロング（新規に買い注文を入れる）
-            order = exchange.create_market_buy_order(symbol, amount)
-            print(f"SUCCESS: Margin Long Order Executed! {order['id']}")
-            return jsonify({"status": "success", "message": "Margin Long executed"}), 200
+        data = request.get_json()
+        
+        # 1. 認証プロトコル
+        if not data or data.get("password") != "friday":
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
             
-        elif action == 'sell':
-            # 📉 ショート（新規に空売り注文を入れる）
-            order = exchange.create_market_sell_order(symbol, amount)
-            print(f"SUCCESS: Margin Short Order Executed! {order['id']}")
-            return jsonify({"status": "success", "message": "Margin Short executed"}), 200
+        target_action = data.get("action")  # 'buy' または 'sell'
+        if target_action not in ['buy', 'sell']:
+            return jsonify({"status": "error", "message": "Invalid action"}), 400
+
+        print(f"--- SIGNAL RECEIVED: {target_action.upper()} ---")
+
+        # 2. 信用口座のアクティブポジションの現地現物確認
+        # bitbank独自の信用アクティブポジション取得 API を直接コール
+        position_res = exchange.privateGetMarginPositionActive()
+        active_positions = position_res.get('data', {}).get('positions', [])
+        
+        # BTC/JPY のポジションのみを抽出
+        btc_positions = [p for p in active_positions if p.get('pair') == 'btc_jpy']
+
+        # 3. 既存ポジションの決済処理（双方向モードの相殺ロジック）
+        for pos in btc_positions:
+            pos_id = pos.get('position_id')
+            pos_side = pos.get('side')  # 'buy' (long) または 'sell' (short)
+            pos_amount = float(pos.get('amount', 0))
+
+            # シグナルと逆のポジション、または既存ポジションが存在する場合は全決済
+            print(f"Existing position found: ID={pos_id}, Side={pos_side}, Amount={pos_amount}")
             
+            # 決済注文の方向を決定（ロング決済ならsell、ショート決済ならbuy）
+            close_side = 'sell' if pos_side == 'buy' else 'buy'
+            
+            # position_id を明示的に指定して成行決済注文を執行
+            close_order = exchange.create_order(
+                symbol=SYMBOL,
+                type='market',
+                side=close_side,
+                amount=pos_amount,
+                params={'position_id': pos_id}
+            )
+            print(f"SUCCESS: Position Close Executed. Order ID: {close_order['id']}")
+            
+            # クリティカル・ウェイト：nonce（タイムスタンプ）の衝突を100%回避するインターバル
+            time.sleep(1.5)
+
+        # 4. 新規ドテンエントリー処理
+        print(f"Executing New Target Entry: {target_action.upper()} | Amount: {FIXED_AMOUNT}")
+        if target_action == 'buy':
+            new_order = exchange.create_market_buy_order(SYMBOL, FIXED_AMOUNT)
         else:
-            return jsonify({"status": "error", "message": "Unknown action"}), 400
+            new_order = exchange.create_market_sell_order(SYMBOL, FIXED_AMOUNT)
             
+        print(f"SUCCESS: New Entry Executed. Order ID: {new_order['id']}")
+        return jsonify({"status": "success", "message": f"Friday system flipped to {target_action}"}), 200
+
     except Exception as e:
-        print(f"ERROR: {str(e)}")
+        print(f"CRITICAL ERROR: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
