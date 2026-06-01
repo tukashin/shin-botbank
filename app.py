@@ -6,13 +6,16 @@ import ccxt
 app = Flask(__name__)
 
 # ==========================================
-# 1. bitbank APIクライアント初期化
+# 1. bitbank APIクライアント初期化（信用取引モード）
 # 認証情報はRenderの「Environment variables」から安全に取得
 # ==========================================
 exchange = ccxt.bitbank({
     'apiKey': os.environ.get('BITBANK_API_KEY'),
     'secret': os.environ.get('BITBANK_API_SECRET'),
-    'enableRateLimit': True
+    'enableRateLimit': True,
+    'options': {
+        'defaultType': 'margin'
+    }
 })
 
 SYMBOL = 'BTC/JPY'
